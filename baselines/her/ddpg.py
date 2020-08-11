@@ -7,15 +7,15 @@ from tensorflow.contrib.staging import StagingArea
 from baselines import logger
 from baselines.her.util import (
     import_function, store_args, flatten_grads, transitions_in_episode_batch, convert_episode_to_batch_major)
-from baselines.her.normalizer import Normalizer
+from baselines.her.normalizer import Normalizer, IdentityNormalizer
 from baselines.her.replay_buffer import ReplayBuffer
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common import tf_util
 
+import pdb
 
 def dims_to_shapes(input_dims):
-    return {key: tuple([val]) if val > 0 else tuple() for key, val in input_dims.items()}
-
+    return {key: val if isinstance(val, tuple) else tuple([val]) for key, val in input_dims.items()}
 
 global DEMO_BUFFER #buffer for demonstrations
 
@@ -66,7 +66,6 @@ class DDPG(object):
             self.clip_return = np.inf
 
         self.create_actor_critic = import_function(self.network_class)
-
         input_shapes = dims_to_shapes(self.input_dims)
         self.dimo = self.input_dims['o']
         self.dimg = self.input_dims['g']
@@ -82,7 +81,7 @@ class DDPG(object):
             stage_shapes[key + '_2'] = stage_shapes[key]
         stage_shapes['r'] = (None,)
         self.stage_shapes = stage_shapes
-
+        self.normalizer_class = Normalizer if 'CNN' not in self.network_class else IdentityNormalizer
         # Create network.
         with tf.variable_scope(self.scope):
             self.staging_tf = StagingArea(
@@ -97,11 +96,15 @@ class DDPG(object):
         # Configure the replay buffer.
         buffer_shapes = {key: (self.T-1 if key != 'o' else self.T, *input_shapes[key])
                          for key, val in input_shapes.items()}
-        buffer_shapes['g'] = (buffer_shapes['g'][0], self.dimg)
-        buffer_shapes['ag'] = (self.T, self.dimg)
+        buffer_shapes['g'] = (buffer_shapes['g'][0], *self.dimg)
+        if 's_ag' in self.input_dims:
+            buffer_shapes['s_ag'] = (self.T, *self.input_dims['s_ag'])
+            buffer_shapes['s_g'] = (self.T - 1, *self.input_dims['s_g'])
+        buffer_shapes['ag'] = (self.T, *self.input_dims['ag'])
 
         buffer_size = (self.buffer_size // self.rollout_batch_size) * self.rollout_batch_size
         self.buffer = ReplayBuffer(buffer_shapes, buffer_size, self.T, self.sample_transitions)
+
 
         global DEMO_BUFFER
         DEMO_BUFFER = ReplayBuffer(buffer_shapes, buffer_size, self.T, self.sample_transitions) #initialize the demo buffer; in the same way as the primary data buffer
@@ -112,8 +115,8 @@ class DDPG(object):
     def _preprocess_og(self, o, ag, g):
         if self.relative_goals:
             g_shape = g.shape
-            g = g.reshape(-1, self.dimg)
-            ag = ag.reshape(-1, self.dimg)
+            g = g.reshape(-1, *self.dimg)
+            ag = ag.reshape(-1, *self.input_dims['ag'])
             g = self.subtract_goals(g, ag)
             g = g.reshape(*g_shape)
         o = np.clip(o, -self.clip_obs, self.clip_obs)
@@ -134,13 +137,14 @@ class DDPG(object):
         if compute_Q:
             vals += [policy.Q_pi_tf]
         # feed
-        feed = {
-            policy.o_tf: o.reshape(-1, self.dimo),
-            policy.g_tf: g.reshape(-1, self.dimg),
-            policy.u_tf: np.zeros((o.size // self.dimo, self.dimu), dtype=np.float32)
-        }
+        with tf.device('/GPU:0'):
+            feed = {
+                policy.o_tf: o.reshape(-1, *self.dimo),
+                policy.g_tf: g.reshape(-1, *self.dimg),
+                policy.u_tf: np.zeros((o.shape[0], self.dimu), dtype=np.float32)
+            }
 
-        ret = self.sess.run(vals, feed_dict=feed)
+            ret = self.sess.run(vals, feed_dict=feed)
         # action postprocessing
         u = ret[0]
         noise = noise_eps * self.max_u * np.random.randn(*u.shape)  # gaussian noise
@@ -226,6 +230,8 @@ class DDPG(object):
             # add transitions to normalizer
             episode_batch['o_2'] = episode_batch['o'][:, 1:, :]
             episode_batch['ag_2'] = episode_batch['ag'][:, 1:, :]
+            if 's_ag' in episode_batch.keys():
+                 episode_batch['s_ag_2'] = episode_batch['s_ag'][:, 1:, :]
             num_normalizing_transitions = transitions_in_episode_batch(episode_batch)
             transitions = self.sample_transitions(episode_batch, num_normalizing_transitions)
 
@@ -248,12 +254,13 @@ class DDPG(object):
 
     def _grads(self):
         # Avoid feed_dict here for performance!
-        critic_loss, actor_loss, Q_grad, pi_grad = self.sess.run([
-            self.Q_loss_tf,
-            self.main.Q_pi_tf,
-            self.Q_grad_tf,
-            self.pi_grad_tf
-        ])
+        with tf.device('/GPU:0'):
+            critic_loss, actor_loss, Q_grad, pi_grad = self.sess.run([
+                self.Q_loss_tf,
+                self.main.Q_pi_tf,
+                self.Q_grad_tf,
+                self.pi_grad_tf
+            ])
         return critic_loss, actor_loss, Q_grad, pi_grad
 
     def _update(self, Q_grad, pi_grad):
@@ -320,20 +327,17 @@ class DDPG(object):
         with tf.variable_scope('o_stats') as vs:
             if reuse:
                 vs.reuse_variables()
-            self.o_stats = Normalizer(self.dimo, self.norm_eps, self.norm_clip, sess=self.sess)
+            self.o_stats = self.normalizer_class(self.dimo, self.norm_eps, self.norm_clip, sess=self.sess)
         with tf.variable_scope('g_stats') as vs:
             if reuse:
                 vs.reuse_variables()
-            self.g_stats = Normalizer(self.dimg, self.norm_eps, self.norm_clip, sess=self.sess)
+            self.g_stats = self.normalizer_class(self.dimg, self.norm_eps, self.norm_clip, sess=self.sess)
 
         # mini-batch sampling.
         batch = self.staging_tf.get()
         batch_tf = OrderedDict([(key, batch[i])
                                 for i, key in enumerate(self.stage_shapes.keys())])
         batch_tf['r'] = tf.reshape(batch_tf['r'], [-1, 1])
-
-        #choose only the demo buffer samples
-        mask = np.concatenate((np.zeros(self.batch_size - self.demo_batch_size), np.ones(self.demo_batch_size)), axis = 0)
 
         # networks
         with tf.variable_scope('main') as vs:
@@ -359,6 +363,7 @@ class DDPG(object):
         self.Q_loss_tf = tf.reduce_mean(tf.square(tf.stop_gradient(target_tf) - self.main.Q_tf))
 
         if self.bc_loss ==1 and self.q_filter == 1 : # train with demonstrations and use bc_loss and q_filter both
+            mask = np.concatenate((np.zeros(self.batch_size - self.demo_batch_size), np.ones(self.demo_batch_size)), axis = 0)
             maskMain = tf.reshape(tf.boolean_mask(self.main.Q_tf > self.main.Q_pi_tf, mask), [-1]) #where is the demonstrator action better than actor action according to the critic? choose those samples only
             #define the cloning loss on the actor's actions only on the samples which adhere to the above masks
             self.cloning_loss_tf = tf.reduce_sum(tf.square(tf.boolean_mask(tf.boolean_mask((self.main.pi_tf), mask), maskMain, axis=0) - tf.boolean_mask(tf.boolean_mask((batch_tf['u']), mask), maskMain, axis=0)))

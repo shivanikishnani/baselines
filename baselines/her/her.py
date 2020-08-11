@@ -35,21 +35,30 @@ def train(*, policy, rollout_worker, evaluator,
     if policy.bc_loss == 1: policy.init_demo_buffer(demo_file) #initialize demo buffer if training with demonstrations
 
     # num_timesteps = n_epochs * n_cycles * rollout_length * number of rollout workers
-    for epoch in range(n_epochs):
+    for epoch in range(n_epochs + 1):
         # train
         rollout_worker.clear_history()
-        for _ in range(n_cycles):
-            episode = rollout_worker.generate_rollouts()
-            policy.store_episode(episode)
+        for cycle in range(n_cycles):
+            num = 1
+            if epoch == 0 and cycle == 0:
+                num = 10
+            for _ in range(num):
+                episode = rollout_worker.generate_rollouts()
+                policy.store_episode(episode)
             for _ in range(n_batches):
                 policy.train()
             policy.update_target_net()
 
         # test
         evaluator.clear_history()
+        if evaluator.count % evaluator.vid_freq == 0:
+            evaluator.video.init(enabled=True)
         for _ in range(n_test_rollouts):
             evaluator.generate_rollouts()
-
+        if evaluator.count % evaluator.vid_freq == 0:
+            evaluator.video.save('%d.mp4' % epoch)
+            logger.info("Saved video: ", '%d.mp4' % epoch)
+        evaluator.count += 1
         # record logs
         logger.record_tabular('epoch', epoch)
         for key, val in evaluator.logs('test'):
@@ -94,6 +103,8 @@ def learn(*, network, env, total_timesteps,
     override_params=None,
     load_path=None,
     save_path=None,
+    video=None, 
+    vid_freq=0,
     **kwargs
 ):
 
@@ -111,6 +122,11 @@ def learn(*, network, env, total_timesteps,
     env_name = env.spec.id
     params['env_name'] = env_name
     params['replay_strategy'] = replay_strategy
+    if network == 'cnn':
+        if override_params is None:
+            override_params = {}
+        override_params['network_class'] = override_params['_network_class'] = 'baselines.her.actor_critic:CNNActorCritic'
+        override_params['batch_size'] = 32
     if env_name in config.DEFAULT_ENV_PARAMS:
         params.update(config.DEFAULT_ENV_PARAMS[env_name])  # merge env-specific parameters in
     params.update(**override_params)  # makes it possible to override any parameter
@@ -121,7 +137,6 @@ def learn(*, network, env, total_timesteps,
 
     if demo_file is not None:
         params['bc_loss'] = 1
-    params.update(kwargs)
 
     config.log_params(params, logger=logger)
 
@@ -137,7 +152,7 @@ def learn(*, network, env, total_timesteps,
         logger.warn('****************')
         logger.warn()
 
-    dims = config.configure_dims(params)
+    dims = config.configure_dims(params, env)
     policy = config.configure_ddpg(dims=dims, params=params, clip_return=clip_return)
     if load_path is not None:
         tf_util.load_variables(load_path)
@@ -165,7 +180,7 @@ def learn(*, network, env, total_timesteps,
     eval_env = eval_env or env
 
     rollout_worker = RolloutWorker(env, policy, dims, logger, monitor=True, **rollout_params)
-    evaluator = RolloutWorker(eval_env, policy, dims, logger, **eval_params)
+    evaluator = RolloutWorker(eval_env, policy, dims, logger, video=video, vid_freq=vid_freq, **eval_params,)
 
     n_cycles = params['n_cycles']
     n_epochs = total_timesteps // n_cycles // rollout_worker.T // rollout_worker.rollout_batch_size
@@ -174,7 +189,7 @@ def learn(*, network, env, total_timesteps,
         save_path=save_path, policy=policy, rollout_worker=rollout_worker,
         evaluator=evaluator, n_epochs=n_epochs, n_test_rollouts=params['n_test_rollouts'],
         n_cycles=params['n_cycles'], n_batches=params['n_batches'],
-        policy_save_interval=policy_save_interval, demo_file=demo_file)
+        policy_save_interval=policy_save_interval, demo_file=demo_file, video=video, vid_freq=vid_freq)
 
 
 @click.command()

@@ -27,7 +27,7 @@ def make_vec_env(env_id, env_type, num_env, seed,
                  flatten_dict_observations=True,
                  gamestate=None,
                  initializer=None,
-                 force_dummy=False):
+                 force_dummy=False, network='mlp'):
     """
     Create a wrapped, monitored SubprocVecEnv for Atari and MuJoCo.
     """
@@ -49,7 +49,7 @@ def make_vec_env(env_id, env_type, num_env, seed,
             wrapper_kwargs=wrapper_kwargs,
             env_kwargs=env_kwargs,
             logger_dir=logger_dir,
-            initializer=initializer
+            initializer=initializer, 
         )
 
     set_global_seeds(seed)
@@ -79,7 +79,8 @@ def make_env(env_id, env_type, mpi_rank=0, subrank=0, seed=None, reward_scale=1.
         env = retro_wrappers.make_retro(game=env_id, max_episode_steps=10000, use_restricted_actions=retro.Actions.DISCRETE, state=gamestate)
     else:
         env = gym.make(env_id, **env_kwargs)
-
+    if wrapper_kwargs and 'wrapper' in wrapper_kwargs.keys() and 'kwargs' in wrapper_kwargs.keys():
+        env = wrapper_kwargs['wrapper'](env, **wrapper_kwargs['kwargs'])
     if flatten_dict_observations and isinstance(env.observation_space, gym.spaces.Dict):
         keys = env.observation_space.spaces.keys()
         env = gym.wrappers.FlattenDictWrapper(env, dict_keys=list(keys))
@@ -158,10 +159,10 @@ def common_arg_parser():
     Create an argparse.ArgumentParser for run_mujoco.py.
     """
     parser = arg_parser()
-    parser.add_argument('--env', help='environment ID', type=str, default='Reacher-v2')
+    parser.add_argument('--env', help='environment ID', type=str, default='FetchReach-v1')
     parser.add_argument('--env_type', help='type of environment, used when the environment type cannot be automatically determined', type=str)
     parser.add_argument('--seed', help='RNG seed', type=int, default=None)
-    parser.add_argument('--alg', help='Algorithm', type=str, default='ppo2')
+    parser.add_argument('--alg', help='Algorithm', type=str, default='her')
     parser.add_argument('--num_timesteps', type=float, default=1e6),
     parser.add_argument('--network', help='network type (mlp, cnn, lstm, cnn_lstm, conv_only)', default=None)
     parser.add_argument('--gamestate', help='game state to load (so far only used in retro games)', default=None)

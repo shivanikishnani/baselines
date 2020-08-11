@@ -138,3 +138,28 @@ def reshape_for_broadcasting(source, target):
     dim = len(target.get_shape())
     shape = ([1] * (dim - 1)) + [-1]
     return tf.reshape(tf.cast(source, target.dtype), shape)
+
+def nature_cnn(unscaled_images, i = 0, **conv_kwargs):
+    """
+    CNN from Nature paper.
+    """
+    if len(unscaled_images.get_shape()) == 3:
+        unscaled_images = tf.transpose(unscaled_images, (1, 2, 0))
+    elif len(unscaled_images.get_shape()) == 4:
+        unscaled_images = tf.transpose(unscaled_images, (0, 2, 3, 1))
+
+    from baselines.a2c.utils import conv, fc, conv_to_fc
+    scaled_images = tf.cast(unscaled_images, tf.float32) / 255.
+    activ = tf.nn.relu
+    h = activ(conv(scaled_images, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2),
+                   **conv_kwargs))
+    h2 = activ(conv(h, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), **conv_kwargs))
+    h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    h3 = conv_to_fc(h3)
+    return activ(fc(h3, 'fc1', nh=512, init_scale=np.sqrt(2)))
+
+def cnn(**conv_kwargs):
+    def network_fn(X):
+        return nature_cnn(X, **conv_kwargs)
+    return network_fn
+

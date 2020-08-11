@@ -40,8 +40,14 @@ def make_sample_her_transitions(replay_strategy, replay_k, reward_fun):
         # HER transitions (as defined by her_indexes). For the other transitions,
         # keep the original goal.
         future_ag = episode_batch['ag'][episode_idxs[her_indexes], future_t]
+        if future_ag.shape != transitions['g'][her_indexes].shape:
+            future_ag = episode_batch['o'][episode_idxs[her_indexes], future_t]
+
         transitions['g'][her_indexes] = future_ag
 
+        if 's_ag' in episode_batch.keys():
+            future_obs = episode_batch['s_ag'][episode_idxs[her_indexes], future_t]
+            transitions['s_g'][her_indexes] = future_obs
         # Reconstruct info dictionary for reward  computation.
         info = {}
         for key, value in transitions.items():
@@ -49,7 +55,10 @@ def make_sample_her_transitions(replay_strategy, replay_k, reward_fun):
                 info[key.replace('info_', '')] = value
 
         # Re-compute reward since we may have substituted the goal.
-        reward_params = {k: transitions[k] for k in ['ag_2', 'g']}
+        if 's_ag' in episode_batch:
+            reward_params = {k[2:]: transitions[k] for k in ['s_ag_2', 's_g']}
+        else:
+            reward_params = {k: transitions[k] for k in ['ag_2', 'g']}
         reward_params['info'] = info
         transitions['r'] = reward_fun(**reward_params)
 

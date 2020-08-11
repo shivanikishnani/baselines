@@ -11,7 +11,7 @@ class RolloutWorker:
     @store_args
     def __init__(self, venv, policy, dims, logger, T, rollout_batch_size=1,
                  exploit=False, use_target_net=False, compute_Q=False, noise_eps=0,
-                 random_eps=0, history_len=100, render=False, monitor=False, **kwargs):
+                 random_eps=0, history_len=100, render=False, monitor=False, video=None, vid_freq=0, **kwargs):
         """Rollout worker generates experience by interacting with one or many environments.
 
         Args:
@@ -36,7 +36,9 @@ class RolloutWorker:
 
         self.success_history = deque(maxlen=history_len)
         self.Q_history = deque(maxlen=history_len)
-
+        self.video = video
+        self.vid_freq = vid_freq
+        self.count = 0
         self.n_episodes = 0
         self.reset_all_rollouts()
         self.clear_history()
@@ -46,6 +48,12 @@ class RolloutWorker:
         self.initial_o = self.obs_dict['observation']
         self.initial_ag = self.obs_dict['achieved_goal']
         self.g = self.obs_dict['desired_goal']
+        if 'state_goal' in self.obs_dict.keys():
+            self.initial_ag_s = self.obs_dict['state_achieved_goal']
+            self.s_g = self.obs_dict['state_goal']
+            self.extra_state_keys = True
+        else: 
+            self.extra_state_keys = False   
 
     def generate_rollouts(self):
         """Performs `rollout_batch_size` rollouts in parallel for time horizon `T` with the current
@@ -54,8 +62,13 @@ class RolloutWorker:
         self.reset_all_rollouts()
 
         # compute observations
-        o = np.empty((self.rollout_batch_size, self.dims['o']), np.float32)  # observations
-        ag = np.empty((self.rollout_batch_size, self.dims['g']), np.float32)  # achieved goals
+        o = np.empty((self.rollout_batch_size, *self.dims['o']), np.float32)  # observations
+        ag = np.empty((self.rollout_batch_size, *self.dims['ag']), np.float32)  # achieved goals
+        if self.extra_state_keys:
+            s_ag = np.empty((self.rollout_batch_size, *self.dims['s_g']), np.float32)  # state achieved goals
+            s_ag[:] = self.initial_ag_s
+            s_achieved_goals, s_goals = [], []
+
         o[:] = self.initial_o
         ag[:] = self.initial_ag
 
@@ -64,6 +77,7 @@ class RolloutWorker:
         dones = []
         info_values = [np.empty((self.T - 1, self.rollout_batch_size, self.dims['info_' + key]), np.float32) for key in self.info_keys]
         Qs = []
+        actions = []
         for t in range(self.T):
             policy_output = self.policy.get_actions(
                 o, ag, self.g,
@@ -82,13 +96,18 @@ class RolloutWorker:
                 # The non-batched case should still have a reasonable shape.
                 u = u.reshape(1, -1)
 
-            o_new = np.empty((self.rollout_batch_size, self.dims['o']))
-            ag_new = np.empty((self.rollout_batch_size, self.dims['g']))
+            o_new = np.empty((self.rollout_batch_size, *self.dims['o']))
+            ag_new = np.empty((self.rollout_batch_size, *self.dims['ag']))
+
             success = np.zeros(self.rollout_batch_size)
             # compute new states and observations
             obs_dict_new, _, done, info = self.venv.step(u)
+            actions.append(u)
             o_new = obs_dict_new['observation']
             ag_new = obs_dict_new['achieved_goal']
+            if self.extra_state_keys:
+                s_ag_new = np.empty((self.rollout_batch_size, *self.dims['s_g']))
+                s_ag_new = obs_dict_new['state_achieved_goal']
             success = np.array([i.get('is_success', 0.0) for i in info])
 
             if any(done):
@@ -97,6 +116,15 @@ class RolloutWorker:
                 # after a reset
                 break
 
+            if self.video is not None and self.count % self.vid_freq == 0:
+                self.venv.envs[0].set_to_env_configuration(self.venv.envs[0].state_obs)
+                self.venv.envs[0].toggle_hide_goal_markers(False)
+                self.venv.render('rgb_array')
+                for u in actions:
+                    self.video.record(self.venv.envs[0])
+                    self.venv.step(u)
+                self.venv.envs[0].toggle_hide_goal_markers(True)
+                self.venv.render('rgb_array')
             for i, info_dict in enumerate(info):
                 for idx, key in enumerate(self.info_keys):
                     info_values[idx][t, i] = info[i][key]
@@ -114,6 +142,10 @@ class RolloutWorker:
             goals.append(self.g.copy())
             o[...] = o_new
             ag[...] = ag_new
+            if self.extra_state_keys:
+                s_achieved_goals.append(s_ag.copy())
+                s_goals.append(self.s_g.copy())
+                s_ag[...] = s_ag_new
         obs.append(o.copy())
         achieved_goals.append(ag.copy())
 
@@ -121,6 +153,11 @@ class RolloutWorker:
                        u=acts,
                        g=goals,
                        ag=achieved_goals)
+        if self.extra_state_keys:
+            s_achieved_goals.append(s_ag.copy())
+            episode['s_ag'] = s_achieved_goals
+            episode['s_g'] =  s_goals
+
         for key, value in zip(self.info_keys, info_values):
             episode['info_{}'.format(key)] = value
 

@@ -183,16 +183,20 @@ def configure_ddpg(dims, params, reuse=False, use_mpi=True, clip_return=True):
     return policy
 
 
-def configure_dims(params):
-    env = cached_make_env(params['make_env'])
+def configure_dims(params, env):
+    env = env.envs[0]
     env.reset()
     obs, _, _, info = env.step(env.action_space.sample())
-
     dims = {
-        'o': obs['observation'].shape[0],
+        'o': obs['observation'].shape,
         'u': env.action_space.shape[0],
-        'g': obs['desired_goal'].shape[0],
+        'g': obs['desired_goal'].shape,
+        'ag': obs['achieved_goal'].shape,
     }
+    if 'state_goal' in obs.keys():
+        dims['s_ag'] = obs['state_achieved_goal'].shape
+        dims['s_g'] = obs['state_goal'].shape
+        
     for key, value in info.items():
         value = np.array(value)
         if value.ndim == 0:

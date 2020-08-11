@@ -28,7 +28,7 @@ class VecVideoRecorder(VecEnvWrapper):
         self.directory = os.path.abspath(directory)
         if not os.path.exists(self.directory): os.mkdir(self.directory)
 
-        self.file_prefix = "vecenv"
+        self.file_prefix = ""
         self.file_infix = '{}'.format(os.getpid())
         self.step_id = 0
         self.video_length = video_length

@@ -19,7 +19,7 @@ class Normalizer:
                 [-default_clip_range, default_clip_range]
             sess (object): the TensorFlow session to be used
         """
-        self.size = size
+        self.size = size[0]
         self.eps = eps
         self.default_clip_range = default_clip_range
         self.sess = sess if sess is not None else tf.get_default_session()
@@ -119,7 +119,7 @@ class Normalizer:
 
 
 class IdentityNormalizer:
-    def __init__(self, size, std=1.):
+    def __init__(self, size, std=1., *args, **kwargs):
         self.size = size
         self.mean = tf.zeros(self.size, tf.float32)
         self.std = std * tf.ones(self.size, tf.float32)
