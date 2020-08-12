@@ -26,7 +26,7 @@ class ReplayBuffer:
                 dtype = np.float32
             else:
                 dtype = np.uint8
-            self.buffers[key] = np.empty([self.size, dtype=dtype, *shape])
+            self.buffers[key] = np.empty([self.size, *shape], dtype=dtype)
                         
 
         # memory management
